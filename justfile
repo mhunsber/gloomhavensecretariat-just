@@ -4,7 +4,6 @@ set allow-duplicate-variables
 import? 'settings.just'
 import 'settings.default.just'
 
-
 DOCKER_IMAGE := "gloomhavensecretariat/ghs-server"
 NAME := "ghs-server" # Docker container name
 DATADIR := justfile_directory() / 'data' # path to store persistent server data
@@ -46,6 +45,72 @@ ls-req:
     @printf '\055 %s\n' \
         jq \
         unzip
+
+#-------------------------------#
+#   DOCKER CONTAINER COMMANDS   #
+#-------------------------------#
+
+# Enter the ghs container
+debug: (_verify_state "created")
+    docker exec -it "{{ NAME }}" /bin/sh
+
+# Show ghs container status
+status:
+    docker inspect "{{ NAME }}" | jq '.[].State.Status'
+
+# Stop ghs
+stop:
+    docker stop "{{ NAME }}"
+
+# Start ghs
+start: (_verify_state "created")
+    docker start "{{ NAME }}"
+
+# Remove ghs container
+remove: (stop)
+    docker rm "{{ NAME }}"
+
+# create and run ghs-server
+run port="" data="": (init)
+    #!/usr/bin/env bash
+    set -u
+    docker_create_opts=(--name '{{ NAME }}')
+
+    userport="{{ port }}"
+    userdata="{{ data }}"
+
+    data="${userdata:-{{ DATADIR }}}"
+    docker_create_opts+=(-v "${data}:/root/.ghs")
+
+    if {{ USE_SSL }}; then
+        port="${userport:-{{ HTTPS_PORT }}}"
+        p12src="$(mktemp)"
+        trap "rm -f $p12src" EXIT SIGINT SIGTERM ERR
+        if ! [ -f "$p12src" ]; then
+            printf '%s\n' "{{ BOLD + RED }}$p12src does not exist!{{ NORMAL }}"
+            exit 1
+        fi
+        just cert_to_pkcs12 "$p12src"
+        keystore_pass="$(cat '{{ KEYSTORE_PASS_FILE }}')"
+        rm '{{ KEYSTORE_PASS_FILE }}'
+        docker_create_opts+=(-e '{{ KEYSTORE_PASS_VAR }}='"$keystore_pass")
+    else
+        port="${userport:-{{ HTTP_PORT }}}"
+    fi
+    docker_create_opts+=(-p "${port}:8080")
+
+    set -e
+    docker create "${docker_create_opts[@]}" "{{ DOCKER_IMAGE }}"
+
+    if [ -f "$p12src" ]; then
+        docker cp "$p12src" "{{ NAME }}:{{ KEYSTORE_MOUNT_PATH }}"
+    fi
+
+    docker start "{{ NAME }}"
+
+#-------------------------------#
+#      DATA MANAGEMENT          #
+#-------------------------------#
 
 # Update all components. Force will update client even if SERVE_CLIENT is false
 update force="false": (update_server) (update_client force "true")
@@ -100,77 +165,8 @@ update_client force="false" quiet="false":
         unzip "$tmp" -d "{{ CLIENTDIR }}"
     fi
 
-# Stop ghs
-stop:
-    docker stop "{{ NAME }}"
-
-# Start ghs
-start: (_verify_state "created")
-    docker start "{{ NAME }}"
-
-# Remove ghs container
-remove: (stop)
-    docker rm "{{ NAME }}"
-
-_verify_state container="created":
-    #!/usr/bin/env bash
-    set -u
-    if ! docker info > /dev/null 2>&1; then
-        printf '%s\n' "{{ RED }}Docker does not appear to be running!{{ NORMAL }}"
-        exit 1
-    fi
-    if docker inspect "{{ NAME }}" > /dev/null 2>&1; then
-        if [ "{{ container }}" != "created" ]; then
-            printf '%s\n' "{{ RED }}'{{ NAME }}' already exists. Run 'just remove' to remove it.{{ NORMAL }}"
-            exit 1
-        fi
-    else
-        if [ "{{ container }}" = "created" ]; then
-            printf '%s\n' "{{ RED }}'{{ NAME }}' does not exist. Run 'just run' to create it.{{ NORMAL }}"
-            exit 1
-        fi
-    fi
-
-# create and run ghs-server
-run port="" data="": (_verify_state "removed") (init)
-    #!/usr/bin/env bash
-    set -u
-    docker_create_opts=(--name '{{ NAME }}')
-
-    userport="{{ port }}"
-    userdata="{{ data }}"
-
-    data="${userdata:-{{ DATADIR }}}"
-    docker_create_opts+=(-v "${data}:/root/.ghs")
-
-    if {{ USE_SSL }}; then
-        port="${userport:-{{ HTTPS_PORT }}}"
-        p12src="$(mktemp)"
-        trap "rm -f $p12src" EXIT SIGINT SIGTERM ERR
-        if ! [ -f "$p12src" ]; then
-            printf '%s\n' "{{ BOLD + RED }}$p12src does not exist!{{ NORMAL }}"
-            exit 1
-        fi
-        just cert_to_pkcs12 "$p12src"
-        keystore_pass="$(cat '{{ KEYSTORE_PASS_FILE }}')"
-        rm '{{ KEYSTORE_PASS_FILE }}'
-        docker_create_opts+=(-e '{{ KEYSTORE_PASS_VAR }}='"$keystore_pass")
-    else
-        port="${userport:-{{ HTTP_PORT }}}"
-    fi
-    docker_create_opts+=(-p "${port}:8080")
-
-    set -e
-    docker create "${docker_create_opts[@]}" "{{ DOCKER_IMAGE }}"
-
-    if [ -f "$p12src" ]; then
-        docker cp "$p12src" "{{ NAME }}:{{ KEYSTORE_MOUNT_PATH }}"
-    fi
-
-    docker start "{{ NAME }}"   
-
 # initialize components
-init: (update) (gen_app_props)
+init: (_verify_state "removed/uninitialized") (update) (gen_app_props)
     @if [ "{{ SERVE_CLIENT }}" = "false" ]; then just remove_client; fi
 
 # Generate application.properties based on settings
@@ -196,12 +192,32 @@ gen_app_props:
 
     tee $file < <(printf '%s\n' "${settings[@]}")
 
-# Enter the ghs container
-debug:
-    docker exec -it "{{ NAME }}" /bin/sh
+# ------------------------------- #
+#       HELPER FUNCTIONS          #
+# ------------------------------- #
 
-status:
-    docker inspect "{{ NAME }}" | jq '.[].State.Status'
+_verify_state container="created":
+    #!/usr/bin/env bash
+    set -u
+    if ! docker info > /dev/null 2>&1; then
+        printf '%s\n' "{{ RED }}Docker does not appear to be running!{{ NORMAL }}"
+        exit 1
+    fi
+    if docker inspect "{{ NAME }}" > /dev/null 2>&1; then
+        if [ "{{ container }}" != "created" ]; then
+            printf '%s\n' "{{ RED }}'{{ NAME }}' already exists. Run 'just remove' to remove it.{{ NORMAL }}"
+            exit 1
+        fi
+    else
+        if [ "{{ container }}" = "created" ]; then
+            printf '%s\n' "{{ RED }}'{{ NAME }}' does not exist. Run 'just run' to create it.{{ NORMAL }}"
+            exit 1
+        fi
+    fi
+
+#-------------------------------#
+#      SSL SUPPORT              #
+#-------------------------------#
 
 # Runs the keytool command in the ghs-server image (don't need java dependency)
 keytool *args:
