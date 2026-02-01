@@ -1,0 +1,9 @@
+*.env
+.secrets.just
+settings.just
+*.key
+*.p12
+*.pass
+application.properties
+*.sqlite
+data/
