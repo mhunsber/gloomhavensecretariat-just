@@ -50,6 +50,10 @@ ls-req:
 #   DOCKER CONTAINER COMMANDS   #
 #-------------------------------#
 
+# Attach the current shell to the running ghs container
+attach: (_verify_state "created")
+    docker attach "{{ NAME }}"
+
 # Enter the ghs container
 debug: (_verify_state "created")
     docker exec -it "{{ NAME }}" /bin/sh
